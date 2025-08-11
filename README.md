@@ -9,21 +9,20 @@ ClimBox is an innovative solution designed to support the preservation of marine
 ## Project File Structure
 
 ```
-climbox-backend
-├── index.js                 # Main server
+climbox-backend/
+├── index.js                # main server
+├── package.json
+├── .env                    # API keys, spreadsheet mapping, etc. (gitignored)
+├── serviceAccount.json     # Firebase Admin SDK (gitignored)
+├── sheets-credentials.json # Google service account key (gitignored)
 ├── services/
-│   ├── auth.js               # Firestore auth, user profile
-│   ├── sheets.js             # Google Sheets API read/write
-│   ├── cacheWriter.js        # Local JSON cache handling
-│   └── threshold.js          # Threshold check logic
-├── routes/
-│   ├── ingest.js             # Optional ingest route (if pushing to sheets)
-│   ├── notifications.js      # Serve notifications from cache
-│   ├── users.js              # Sign-up/sign-in/profile endpoints
-│   └── sensors.js            # Fetch sensor data (from local cache or sheets)
+│   ├── sheets.js           # Sheets API wrapper
+│   ├── cacheWriter.js      # appendToCache, atomic writes
+│   └── threshold.js        # threshold logic + dedupe
+├── sync-sheets.js          # one-off or cron-triggered full sync script
 ├── public/
-│   └── data/                 # Local cached JSON data
-└── package.json
+│   └── data/               # cached daily JSON files (gitignored)
+└── README.md
 ```
 
 ---

@@ -1,1 +1,14 @@
+sheets-credentials.json
+node_modules
+package-lock.json
+.firebaserc
+firebase.json
 .idx
+.firebase
+firebase-debug.log
+db-notes.txt
+firestore.js
+auth.js
+serviceAccount.json
+firebase-debug.log
+.env
