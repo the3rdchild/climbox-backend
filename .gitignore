@@ -12,3 +12,4 @@ auth.js
 serviceAccount.json
 firebase-debug.log
 .env
+google-service-account.json
