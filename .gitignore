@@ -7,7 +7,6 @@ firebase.json
 .firebase
 firebase-debug.log
 db-notes.txt
-firestore.js
 auth.js
 serviceAccount.json
 firebase-debug.log

@@ -22,6 +22,7 @@ climbox-backend/
 │   ├── ingest.js           # push new data
 ├── services/
 │   ├── sheets.js           # Sheets API wrapper
+│   ├── firestore.js      # Firestore wrapper for users
 │   ├── cacheWriter.js      # appendToCache, atomic writes
 │   └── threshold.js        # threshold logic + dedupe
 ├── sync-sheets.js          # one-off or cron-triggered full sync script
