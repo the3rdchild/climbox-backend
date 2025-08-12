@@ -15,6 +15,11 @@ climbox-backend/
 ├── .env                    # API keys, spreadsheet mapping, etc. (gitignored)
 ├── serviceAccount.json     # Firebase Admin SDK (gitignored)
 ├── sheets-credentials.json # Google service account key (gitignored)
+├── routes/
+│   ├── sensors.js          # read from Sheets
+│   ├── users.js            # login/signup/profile (Firestore)
+│   ├── notifications.js    # read from cache
+│   ├── ingest.js           # push new data
 ├── services/
 │   ├── sheets.js           # Sheets API wrapper
 │   ├── cacheWriter.js      # appendToCache, atomic writes

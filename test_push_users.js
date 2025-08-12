@@ -22,7 +22,7 @@ async function pushUser(uid, email, displayName) {
   console.log(`✅ User ${uid} added to Firestore`);
 }
 
-pushUser("user_001", "test@example.com", "Test User")
+pushUser("user_002", "test@example.com", "Test User")
   .then(() => process.exit(0))
   .catch(err => {
     console.error(err);
