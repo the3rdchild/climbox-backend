@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { getSheetData } = require("../services/sheetsService");
+const { getSheetData } = require("../services/sheets");
 
 // GET /sensors/:locationId
 router.get("/:locationId", async (req, res) => {

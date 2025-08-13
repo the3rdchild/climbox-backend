@@ -1,28 +1,44 @@
 // services/sheets.js
 const { google } = require('googleapis');
-const fs = require('fs');
-require('dotenv').config();
+const path = require('path');
 
-// Load Google Sheets API credentials
-const sheetsCredentials = JSON.parse(
-  fs.readFileSync('./sheets-credentials.json', 'utf-8')
-);
+const sheetsCredentialsPath = process.env.SHEETS_CREDENTIALS_PATH || path.join(__dirname, '../serviceAccount.json');
+const credentials = require(sheetsCredentialsPath);
 
 const auth = new google.auth.JWT(
-  sheetsCredentials.client_email,
+  credentials.client_email,
   null,
-  sheetsCredentials.private_key,
-  ['https://www.googleapis.com/auth/spreadsheets']
+  credentials.private_key,
+  ['https://www.googleapis.com/auth/spreadsheets.readonly']
 );
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-async function readSheet(sheetId, sheetName, range) {
+async function readSheet(sheetId, sheetName) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${sheetName}!${range}`,
+    range: sheetName
   });
-  return res.data.values;
+
+  const rows = res.data.values;
+  if (!rows || rows.length < 2) return [];
+
+  const headers = rows[0];
+  return rows.slice(1).map(row =>
+    Object.fromEntries(headers.map((h, i) => [h, row[i] || null]))
+  );
 }
 
-module.exports = { readSheet };
+// Helper for "wide" sensor rows
+function parseWideRows(rows) {
+  return rows.map(row => {
+    const parsed = {};
+    for (const key in row) {
+      const val = row[key];
+      parsed[key.trim()] = isNaN(Number(val)) ? val : Number(val);
+    }
+    return parsed;
+  });
+}
+
+module.exports = { readSheet, parseWideRows };

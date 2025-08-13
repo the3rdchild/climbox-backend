@@ -11,7 +11,7 @@ const { appendToCache } = require('./services/cacheWriter');
 const { exceedsThreshold } = require('./services/threshold');
 
 // Load sheet mapping from .env or JSON
-const sheetMappings = require('./sheet-config.json');
+const sheetMappings = require('./serviceAccount.json');
 
 const app = express();
 app.use(cors());
