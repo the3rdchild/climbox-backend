@@ -7,7 +7,7 @@ const bodyParser = require('body-parser');
 // Services
 const { readSheet } = require('./services/sheets');
 const { getUser, setUser, db } = require('./services/firestore');
-const { appendToCache } = require('./services/cacheWriter'); // existing
+const { appendToCache } = require('./services/cacheWriter');
 const { exceedsThreshold } = require('./services/threshold');
 
 // ADD THESE LINES:
