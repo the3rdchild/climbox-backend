@@ -748,5 +748,50 @@
     "EC (ms/cm)": "30.88",
     "Pompa Air Laut": "OFF",
     "Pompa Bilas": "OFF"
+  },
+  {
+    "Timestamp": "8/13/2025 18:21:07",
+    "Wind Direction": "selatan",
+    "Wind Speed (km/h)": "0",
+    "Rainfall (mm)": "0",
+    "Distance (mm)": "630",
+    "TSS (V)": "4.224",
+    "TDS (ppm)": "0",
+    "Water Temp (C)": "24.38",
+    "pH": "1.14",
+    "DO (ug/L)": "666",
+    "EC (ms/cm)": "30.88",
+    "Pompa Air Laut": "OFF",
+    "Pompa Bilas": "OFF"
+  },
+  {
+    "Timestamp": "8/13/2025 18:21:07",
+    "Wind Direction": "selatan",
+    "Wind Speed (km/h)": "0",
+    "Rainfall (mm)": "0",
+    "Distance (mm)": "630",
+    "TSS (V)": "4.224",
+    "TDS (ppm)": "0",
+    "Water Temp (C)": "24.38",
+    "pH": "1.14",
+    "DO (ug/L)": "8888",
+    "EC (ms/cm)": "30.88",
+    "Pompa Air Laut": "OFF",
+    "Pompa Bilas": "OFF"
+  },
+  {
+    "Timestamp": "8/13/2025 18:20:08",
+    "Wind Direction": "selatan",
+    "Wind Speed (km/h)": "0",
+    "Rainfall (mm)": "0",
+    "Distance (mm)": "570",
+    "TSS (V)": "4.224",
+    "TDS (ppm)": "0",
+    "Water Temp (C)": "24.38",
+    "pH": "1.11",
+    "DO (ug/L)": "1084",
+    "EC (ms/cm)": "30.88",
+    "Pompa Air Laut": "OFF",
+    "Pompa Bilas": "OFF"
   }
 ]

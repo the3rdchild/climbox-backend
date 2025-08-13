@@ -14,7 +14,7 @@ const auth = new google.auth.JWT(
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-// Grup mapping
+// Grup mapping (keep consistent with frontend)
 const SENSOR_GROUPS = {
   meteorologi: ["Wind Direction", "Wind Speed (km/h)", "Temp udara"],
   presipitasi: ["Rainfall (mm)", "Distance (mm)"],
@@ -24,10 +24,23 @@ const SENSOR_GROUPS = {
   kualitas_turbiditas: ["TSS (V)"]
 };
 
-async function readSheet(sheetId, sheetName) {
+/**
+ * readSheet(spreadsheetId, sheetName, range?)
+ * - sheetName: sheet/tab name (e.g. "Sheet1" or a named range)
+ * - range: optional range string like 'A:Z' (if provided final range = `${sheetName}!${range}`)
+ * Returns array-of-objects (header->value)
+ */
+async function readSheet(sheetId, sheetName, range) {
+  let finalRange;
+  if (range && typeof range === 'string') {
+    finalRange = `${sheetName}!${range}`;
+  } else {
+    finalRange = sheetName; // caller may have provided "Sheet1!A:Z" already
+  }
+
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: sheetName
+    range: finalRange
   });
 
   const rows = res.data.values;
