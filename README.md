@@ -28,7 +28,7 @@ climbox-backend/
 ├── sync-sheets.js          # one-off or cron-triggered full sync script
 ├── public/
 │   └── data/               # cached daily JSON files (gitignored)
-└── README.md
+└── README.md               # zip -r workspace.zip ./*
 ```
 
 ---

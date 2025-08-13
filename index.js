@@ -11,7 +11,7 @@ const { appendToCache } = require('./services/cacheWriter');
 const { exceedsThreshold } = require('./services/threshold');
 
 // Load sheet mapping from .env or JSON
-const sheetMappings = require('./serviceAccount.json');
+const sheetMappings = require('./sheets-credentials.json');
 
 const app = express();
 app.use(cors());
@@ -96,5 +96,5 @@ app.post('/ingest', async (req, res) => {
 });
 
 // ===== Start Server =====
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Backend listening on http://localhost:${PORT}`));

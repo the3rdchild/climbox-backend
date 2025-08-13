@@ -14,6 +14,16 @@ const auth = new google.auth.JWT(
 
 const sheets = google.sheets({ version: 'v4', auth });
 
+// Grup mapping
+const SENSOR_GROUPS = {
+  meteorologi: ["Wind Direction", "Wind Speed (km/h)", "Temp udara"],
+  presipitasi: ["Rainfall (mm)", "Distance (mm)"],
+  kualitas_fisika: ["Water Temp (C)", "EC (ms/cm)"],
+  kualitas_kimia_dasar: ["TDS (ppm)", "pH"],
+  kualitas_kimia_lanjut: ["DO (ug/L)"],
+  kualitas_turbiditas: ["TSS (V)"]
+};
+
 async function readSheet(sheetId, sheetName) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
@@ -29,16 +39,28 @@ async function readSheet(sheetId, sheetName) {
   );
 }
 
-// Helper for "wide" sensor rows
+// Helper untuk parse data + kelompokkan berdasarkan grup
 function parseWideRows(rows) {
   return rows.map(row => {
-    const parsed = {};
-    for (const key in row) {
-      const val = row[key];
-      parsed[key.trim()] = isNaN(Number(val)) ? val : Number(val);
+    const grouped = {
+      timestamp: row.Timestamp || row.timestamp || null,
+      groups: {}
+    };
+
+    // Buat grup sesuai mapping
+    for (const [groupName, fields] of Object.entries(SENSOR_GROUPS)) {
+      grouped.groups[groupName] = {};
+      for (const field of fields) {
+        let val = row[field] ?? null;
+        if (val !== null && !isNaN(Number(val))) {
+          val = Number(val);
+        }
+        grouped.groups[groupName][field] = val;
+      }
     }
-    return parsed;
+
+    return grouped;
   });
 }
 
-module.exports = { readSheet, parseWideRows };
+module.exports = { readSheet, parseWideRows, SENSOR_GROUPS };
