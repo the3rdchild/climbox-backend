@@ -793,5 +793,35 @@
     "EC (ms/cm)": "30.88",
     "Pompa Air Laut": "OFF",
     "Pompa Bilas": "OFF"
+  },
+  {
+    "Timestamp": "8/13/2025 17:51:34",
+    "Wind Direction": "selatan",
+    "Wind Speed (km/h)": "0",
+    "Rainfall (mm)": "0",
+    "Distance (mm)": "480",
+    "TSS (V)": "1111",
+    "TDS (ppm)": "0",
+    "Water Temp (C)": "24.5",
+    "pH": "5.86",
+    "DO (ug/L)": "hubungin gsheet sama ini",
+    "EC (ms/cm)": "30.81",
+    "Pompa Air Laut": "OFF",
+    "Pompa Bilas": "OFF"
+  },
+  {
+    "Timestamp": "8/13/2025 18:21:07",
+    "Wind Direction": "selatan",
+    "Wind Speed (km/h)": "0",
+    "Rainfall (mm)": "0",
+    "Distance (mm)": "630",
+    "TSS (V)": "4.224",
+    "TDS (ppm)": "0",
+    "Water Temp (C)": "24.38",
+    "pH": "1.14",
+    "DO (ug/L)": "8888",
+    "EC (ms/cm)": "30.88",
+    "Pompa Air Laut": "OFF",
+    "Pompa Bilas": "OFF"
   }
 ]
