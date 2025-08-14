@@ -12,6 +12,6 @@ serviceAccount.json
 firebase-debug.log
 .env
 google-service-account.json
-data
 workspace.zip
 sheet-config.json
+data
