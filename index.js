@@ -5,6 +5,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const mqtt = require('mqtt');
 const path = require('path');
+const fs = require('fs');
 
 // Services (assumed present)
 const { readSheet } = require('./services/sheets');
@@ -67,20 +68,21 @@ function todaySheetName() {
  * If mapping.sheetName contains '{date}', it will be replaced by today's date.
  * If mapping.sheetName is like data_YYYY-MM-DD it will be replaced by today's date as well.
  */
-function getSheetName(mapping, explicit) {
-  if (explicit && String(explicit).trim()) {
-    const s = String(explicit).trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `data_${s}`;
-    return s;
+function getSheetName(mapping, explicitDate) {
+  if (explicitDate) return `data_${explicitDate}`;
+  
+  // cek apakah latest.json ada dan pakai sheetName-nya
+  try {
+    const latestPath = path.join(PUBLIC_DATA_DIR, mapping.locationId, 'latest.json');
+    if (fs.existsSync(latestPath)) {
+      const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+      if (latest.sheetName) return latest.sheetName;
+    }
+  } catch (e) {
+    console.warn('read latest.json error', e);
   }
-  const mapped = mapping && mapping.sheetName ? String(mapping.sheetName) : '';
-  if (mapped.includes('{date}')) {
-    return mapped.replace('{date}', new Date().toISOString().slice(0,10));
-  }
-  if (/^data_\d{4}-\d{2}-\d{2}$/.test(mapped)) {
-    return todaySheetName();
-  }
-  return mapped || todaySheetName();
+
+  return mapping.sheetName || todaySheetName();
 }
 
 // Normalize rows helper (preserve previous behaviour)
@@ -198,9 +200,10 @@ app.get('/debug/sensors/:locationId/raw', async (req, res) => {
   try {
     const mapping = sheetMappings.find(m => m.locationId === req.params.locationId);
     if (!mapping) return res.status(404).json({ ok:false, error:'no_mapping' });
-    const sheetName = getSheetName(mapping);
+    const explicit = req.query.sheetName || req.query.date;
+    const sheetName = getSheetName(mapping, explicit);
     const out = await readSheet(mapping.sheetId, sheetName, 'A:Z');
-    res.json({ ok: true, sample: (out && out[0]) || null });
+    res.json({ ok: true, sheetName, sample: (out && out[0]) || null });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok:false, error: e.message });
@@ -234,24 +237,38 @@ app.get('/sensors/:locationId', async (req, res) => {
   try {
     const loc = req.params.locationId;
     const mapping = sheetMappings.find(m => m.locationId === loc);
-    if (!mapping) return res.status(404).json({error:'no_mapping'});
+    if (!mapping) return res.status(404).json({ error: 'no_mapping' });
 
-    // try cache first (reads latest.json or last file)
-    const cached = readCache(loc);
-    if (cached) return res.json(cached);
-
-    // fallback to reading sheet live
+    // Determine desired sheetName (supports ?sheetName=... or ?date=YYYY-MM-DD)
     const explicit = req.query.sheetName || req.query.date;
-    const sheetName = getSheetName(mapping, explicit);
+    const desiredSheet = getSheetName(mapping, explicit);
 
-    const raw = await readSheet(mapping.sheetId, sheetName, 'A:Z');
-    const rows = arraysToObjects(raw);
+    // Try read latest.json to see what cache points to (if any)
+    try {
+      const locDir = path.join(PUBLIC_DATA_DIR, loc);
+      const latestPath = path.join(locDir, 'latest.json');
+      if (fs.existsSync(latestPath)) {
+        const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+        // if latest refers to the desired sheet, return cached rows
+        if (latest && latest.sheetName === desiredSheet) {
+          const cached = readCache(loc); // returns rows from the cached target file
+          if (cached) return res.json(cached);
+        }
+      }
+    } catch (e) {
+      console.warn('warning checking latest.json for cache validation', e && e.message ? e.message : e);
+      // fallthrough -> we'll read sheet live
+    }
 
-    // write cache
-    writeCache(loc, sheetName, rows);
+    // fallback: read sheet live (this will use desiredSheet)
+    const raw = await readSheet(mapping.sheetId, desiredSheet, 'A:Z');
+    const rows = arraysToObjects(raw || []);
 
-    // publish latest
-    try { publishLocationData(loc, sheetName, rows); } catch (e) { console.warn('publish error', e); }
+    // write cache (overwrites latest.json pointing to desiredSheet)
+    writeCache(loc, desiredSheet, rows);
+
+    // publish latest over MQTT if enabled
+    try { publishLocationData(loc, desiredSheet, rows); } catch (e) { console.warn('publish error', e); }
 
     res.json(rows);
   } catch (err) {
