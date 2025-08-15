@@ -7,6 +7,7 @@ const mqtt = require('mqtt');
 const path = require('path');
 const fs = require('fs');
 
+
 // Services (assumed present)
 const { readSheet } = require('./services/sheets');
 const { getUser, setUser, db } = require('./services/firestore');
@@ -18,6 +19,10 @@ const sheetMappings = require('./sheets-credentials.json');
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/data', express.static(path.join(__dirname, 'public', 'data')));
+// OR serve whole public dir (if you want)
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ===== MQTT CONFIG & CLIENT =====
 const MQTT_URL = process.env.MQTT_URL || ''; // e.g. 'wss://broker.emqx.io:8084/mqtt' or 'mqtt://...'
@@ -97,7 +102,7 @@ function arraysToObjects(rows) {
 
 // publish rows to mqtt (only last N by default)
 // includes dedupe: won't publish if last row timestamp equals previously published
-function publishLocationData(locationId, sheetName, rows) {
+function publishLocationData(locationId, sheetName, rows, opts = {}) {
   if (!mqttClient || !mqttClient.connected) return;
   if (!rows) return;
 
@@ -107,19 +112,27 @@ function publishLocationData(locationId, sheetName, rows) {
   const n = (MQTT_PUBLISH_LATEST_ONLY && totalRows > 0) ? Math.min(MQTT_PUBLISH_LATEST_N, totalRows) : totalRows;
   const publishRows = (n === totalRows) ? rowsArr : rowsArr.slice(-n);
 
-  // attempt to find last timestamp in published rows (if there is a Timestamp column)
+  // attempt to find last timestamp in publishRows (if there is a Timestamp column)
   const lastRow = publishRows.length ? publishRows[publishRows.length - 1] : null;
   const candidateTs = lastRow && (lastRow.Timestamp || lastRow.timestamp || lastRow.time) ? String(lastRow.Timestamp || lastRow.timestamp || lastRow.time) : null;
 
-  // dedupe: if unchanged, skip
-  if (candidateTs) {
+  // dedupe key uses sheetName + timestamp (safer when sheet changes)
+  const dedupeKey = `${sheetName || ''}|${candidateTs || ''}`;
+
+  // allow forcing publish (opts.force true) or force via environment var
+  const force = !!opts.force;
+
+  if (!force && candidateTs) {
     const prev = lastPublishedTs.get(locationId);
-    if (prev === candidateTs) {
-      // nothing changed -> skip publish to keep broker/logs clean
-      // still optional to publish; we skip
+    if (prev === dedupeKey) {
+      // nothing changed -> skip publish
+      console.log(`Skipping publish for ${locationId} — dedupe matched (${dedupeKey})`);
       return;
     }
-    lastPublishedTs.set(locationId, candidateTs);
+    lastPublishedTs.set(locationId, dedupeKey);
+  } else if (force && candidateTs) {
+    // update stored key to reflect forced new publish
+    lastPublishedTs.set(locationId, dedupeKey);
   }
 
   const topic = `${MQTT_BASE_TOPIC}/${locationId}/latest`;
@@ -133,7 +146,7 @@ function publishLocationData(locationId, sheetName, rows) {
   const payload = JSON.stringify(payloadObj);
   mqttClient.publish(topic, payload, { qos: MQTT_QOS, retain: MQTT_RETAIN }, (err) => {
     if (err) console.error('MQTT publish error', err);
-    else console.log(`Published ${topic} (publishedRows: ${publishRows.length} totalRows: ${totalRows})`);
+    else console.log(`Published ${topic} (publishedRows: ${publishRows.length} totalRows: ${totalRows}) sheet:${sheetName} lastRowTs:${candidateTs} force:${force}`);
   });
 }
 
@@ -186,8 +199,18 @@ app.post('/sync-cache/:locationId', async (req, res) => {
 
     writeCache(loc, sheetName, rows);
 
-    try { publishLocationData(loc, sheetName, rows); } catch (e) { console.warn('publish error', e); }
-
+    // append last N rows (or only last row) into appendToCache so historical per-location ingest file grows
+    // require appendToCache from services/cacheWriter.js (already imported earlier)
+    try {
+      // append only last row to per-day ingestion file to avoid duplicating huge arrays
+      const lastRows = Array.isArray(rows) && rows.length ? rows.slice(-1) : rows;
+      appendToCache(loc, lastRows, { sheetName });
+    } catch (e) { console.warn('appendToCache warning', e); }
+    
+    // publish to MQTT
+    const forceFlag = req.query.force === '1' || req.body && req.body.force === true;
+    try { publishLocationData(loc, sheetName, rows, { force: forceFlag }); } catch (e) { console.warn('publish error', e); }
+        
     return res.json({ ok:true, location: loc, sheetName, rows: rows.length });
   } catch (err) {
     console.error('sync-cache error', err);
