@@ -7,25 +7,34 @@ const mqtt = require('mqtt');
 const path = require('path');
 const fs = require('fs');
 
-
-// Services (assumed present)
+// Services (may export appendToCache/writeCache/readCache/PUBLIC_DATA_DIR)
 const { readSheet } = require('./services/sheets');
 const { getUser, setUser, db } = require('./services/firestore');
-const { appendToCache, writeCache, readCache, PUBLIC_DATA_DIR } = require('./services/cacheWriter');
+const cacheWriter = require('./services/cacheWriter'); // we'll call methods safely
 const { exceedsThreshold } = require('./services/threshold');
 
-const sheetMappings = require('./sheets-credentials.json');
+const writeCache = cacheWriter.writeCache;
+const readCache = cacheWriter.readCache;
+const PUBLIC_DATA_DIR = cacheWriter.PUBLIC_DATA_DIR;
+const appendToCache = cacheWriter.appendToCache; // may be undefined or different signature
+
+// Load sheet mapping from sheets-credentials.json
+let sheetMappings = [];
+try {
+  sheetMappings = require('./sheets-credentials.json');
+} catch (e) {
+  console.warn('sheets-credentials.json not found or invalid, continuing with empty mapping');
+}
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
+// serve static files (public, and data)
 app.use('/data', express.static(path.join(__dirname, 'public', 'data')));
-// OR serve whole public dir (if you want)
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ===== MQTT CONFIG & CLIENT =====
-const MQTT_URL = process.env.MQTT_URL || ''; // e.g. 'wss://broker.emqx.io:8084/mqtt' or 'mqtt://...'
+const MQTT_URL = process.env.MQTT_URL || ''; // e.g. 'wss://broker.emqx.io:8084/mqtt'
 const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
 const MQTT_BASE_TOPIC = process.env.MQTT_BASE_TOPIC || 'climbox';
@@ -43,9 +52,7 @@ if (MQTT_URL) {
   };
   console.log('Attempting MQTT connect to', MQTT_URL);
   mqttClient = mqtt.connect(MQTT_URL, mqttOpts);
-  mqttClient.on('connect', () => {
-    console.log('MQTT connected');
-  });
+  mqttClient.on('connect', () => console.log('MQTT connected'));
   mqttClient.on('error', (e) => console.error('MQTT error', e && e.message ? e.message : e));
   mqttClient.on('reconnect', () => console.log('MQTT reconnecting...'));
   mqttClient.on('close', () => console.log('MQTT closed'));
@@ -53,10 +60,10 @@ if (MQTT_URL) {
   console.warn('MQTT_URL not set — MQTT disabled');
 }
 
-// In-memory dedupe map: last published timestamp per location
+// In-memory dedupe map: last published key per location
 const lastPublishedTs = new Map();
 
-// ===== helpers: date & sheetName
+// ===== helpers: date & sheetName =====
 function todaySheetName() {
   const d = new Date();
   const y = d.getFullYear();
@@ -66,28 +73,70 @@ function todaySheetName() {
 }
 
 /**
- * getSheetName(mapping, explicit)
- * explicit can be:
- *  - full sheetName: 'data_2025-08-14' or 'MyTab'
- *  - date '2025-08-14' -> converted to 'data_2025-08-14'
- * If mapping.sheetName contains '{date}', it will be replaced by today's date.
- * If mapping.sheetName is like data_YYYY-MM-DD it will be replaced by today's date as well.
+ * getSheetName(mapping, explicitDate)
+ * - explicitDate: 'YYYY-MM-DD' or a full sheet tab name
+ * Priority:
+ *  1) explicitDate provided -> use it
+ *  2) otherwise -> use today's sheet name (data_YYYY-MM-DD)
+ *
+ * We intentionally IGNORE mapping.sheetName by default so backend always prefers today's sheet.
  */
 function getSheetName(mapping, explicitDate) {
-  if (explicitDate) return `data_${explicitDate}`;
-  
-  // cek apakah latest.json ada dan pakai sheetName-nya
-  try {
-    const latestPath = path.join(PUBLIC_DATA_DIR, mapping.locationId, 'latest.json');
-    if (fs.existsSync(latestPath)) {
-      const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
-      if (latest.sheetName) return latest.sheetName;
+  if (explicitDate) {
+    const s = String(explicitDate).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `data_${s}`;
+    return s;
+  }
+  return todaySheetName();
+}
+
+/**
+ * findRecentSheetAndRows(mapping, explicit, maxBackDays)
+ * - Attempts to read today's sheet first; if empty / not found then try previous days up to maxBackDays.
+ * - If explicit provided, attempts only that sheetName/date.
+ * - Returns { sheetName, rows } where rows = array (maybe empty)
+ */
+async function findRecentSheetAndRows(mapping, explicit, maxBackDays = 3) {
+  const sheetId = mapping.sheetId;
+  if (!sheetId) return { sheetName: getSheetName(mapping, explicit), rows: [] };
+
+  // explicit override (sheetName or date)
+  if (explicit) {
+    const sn = getSheetName(mapping, explicit);
+    try {
+      const raw = await readSheet(sheetId, sn, 'A:Z');
+      const rows = arraysToObjects(raw || []);
+      return { sheetName: sn, rows };
+    } catch (err) {
+      // explicit requested but read failed -> return empty rows with the explicit name
+      console.warn(`findRecentSheetAndRows explicit read failed for ${sn}:`, err && err.message ? err.message : err);
+      return { sheetName: sn, rows: [] };
     }
-  } catch (e) {
-    console.warn('read latest.json error', e);
   }
 
-  return mapping.sheetName || todaySheetName();
+  // try today then back up
+  for (let i = 0; i < Math.max(1, maxBackDays); i++) {
+    const dt = new Date();
+    dt.setDate(dt.getDate() - i);
+    const yyyy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    const cand = `data_${yyyy}-${mm}-${dd}`;
+    try {
+      const raw = await readSheet(sheetId, cand, 'A:Z');
+      const rows = arraysToObjects(raw || []);
+      if (Array.isArray(rows) && rows.length > 0) {
+        return { sheetName: cand, rows };
+      }
+      // continue if empty
+    } catch (err) {
+      // sheet/tab might not exist or permission issue -> continue trying previous days
+      // console.debug(`readSheet failed for ${cand}:`, err && err.message ? err.message : err);
+    }
+  }
+
+  // nothing found -> return today's sheetName but rows empty
+  return { sheetName: todaySheetName(), rows: [] };
 }
 
 // Normalize rows helper (preserve previous behaviour)
@@ -100,38 +149,61 @@ function arraysToObjects(rows) {
   return rows;
 }
 
-// publish rows to mqtt (only last N by default)
-// includes dedupe: won't publish if last row timestamp equals previously published
+// Safe appendToCache wrapper: tolerant to different cacheWriter implementations
+async function safeAppendToCache(locationId, rows, meta = {}) {
+  if (!appendToCache) {
+    // nothing to call
+    return;
+  }
+  try {
+    // If appendToCache expects (locationId, rows, meta)
+    if (appendToCache.length >= 2) {
+      // try with locationId, rows, meta
+      try {
+        await appendToCache(locationId, rows, meta);
+        return;
+      } catch (e) {
+        // try fallback below
+      }
+    }
+
+    // fallback: call with single object
+    const payload = {
+      locationId,
+      rows,
+      meta,
+      cachedAt: new Date().toISOString()
+    };
+    await appendToCache(payload);
+  } catch (err) {
+    console.warn('safeAppendToCache failed', err && err.message ? err.message : err);
+  }
+}
+
+// publish rows to mqtt (only last N by default) with dedupe
 function publishLocationData(locationId, sheetName, rows, opts = {}) {
   if (!mqttClient || !mqttClient.connected) return;
   if (!rows) return;
 
-  // normalize to array
   const rowsArr = Array.isArray(rows) ? rows : [rows];
   const totalRows = rowsArr.length;
   const n = (MQTT_PUBLISH_LATEST_ONLY && totalRows > 0) ? Math.min(MQTT_PUBLISH_LATEST_N, totalRows) : totalRows;
   const publishRows = (n === totalRows) ? rowsArr : rowsArr.slice(-n);
 
-  // attempt to find last timestamp in publishRows (if there is a Timestamp column)
   const lastRow = publishRows.length ? publishRows[publishRows.length - 1] : null;
   const candidateTs = lastRow && (lastRow.Timestamp || lastRow.timestamp || lastRow.time) ? String(lastRow.Timestamp || lastRow.timestamp || lastRow.time) : null;
 
-  // dedupe key uses sheetName + timestamp (safer when sheet changes)
   const dedupeKey = `${sheetName || ''}|${candidateTs || ''}`;
-
-  // allow forcing publish (opts.force true) or force via environment var
   const force = !!opts.force;
 
   if (!force && candidateTs) {
     const prev = lastPublishedTs.get(locationId);
     if (prev === dedupeKey) {
-      // nothing changed -> skip publish
       console.log(`Skipping publish for ${locationId} — dedupe matched (${dedupeKey})`);
       return;
     }
     lastPublishedTs.set(locationId, dedupeKey);
   } else if (force && candidateTs) {
-    // update stored key to reflect forced new publish
     lastPublishedTs.set(locationId, dedupeKey);
   }
 
@@ -165,7 +237,7 @@ app.get('/', (req, res) => {
   res.send('ClimBox backend running (Hybrid: Firestore + Google Sheets) — MQTT integrated');
 });
 
-// GET /locations -> read from sheetMappings
+// GET /locations -> mapping for frontend
 app.get('/locations', (req, res) => {
   try {
     const out = (sheetMappings || []).map(m => ({
@@ -184,7 +256,7 @@ app.get('/locations', (req, res) => {
   }
 });
 
-// POST /sync-cache/:locationId  -> force read sheet and update cache + publish
+// POST /sync-cache/:locationId -> force read sheet and update cache + publish
 app.post('/sync-cache/:locationId', async (req, res) => {
   try {
     const loc = req.params.locationId;
@@ -192,41 +264,39 @@ app.post('/sync-cache/:locationId', async (req, res) => {
     if (!mapping) return res.status(404).json({ ok:false, error:'no_mapping' });
 
     const explicit = req.body.sheetName || req.query.sheetName || req.query.date;
-    const sheetName = getSheetName(mapping, explicit);
+    // find recent sheet (today then back up)
+    const { sheetName, rows } = await findRecentSheetAndRows(mapping, explicit, parseInt(process.env.SHEETS_LOOKBACK_DAYS || '3', 10));
 
-    const rawRows = await readSheet(mapping.sheetId, sheetName, 'A:Z');
-    const rows = arraysToObjects(rawRows);
-
+    // write cache file(s)
     writeCache(loc, sheetName, rows);
 
-    // append last N rows (or only last row) into appendToCache so historical per-location ingest file grows
-    // require appendToCache from services/cacheWriter.js (already imported earlier)
+    // append last row into ingestion cache (if appendToCache exists)
     try {
-      // append only last row to per-day ingestion file to avoid duplicating huge arrays
       const lastRows = Array.isArray(rows) && rows.length ? rows.slice(-1) : rows;
-      appendToCache(loc, lastRows, { sheetName });
-    } catch (e) { console.warn('appendToCache warning', e); }
-    
-    // publish to MQTT
+      await safeAppendToCache(loc, lastRows, { sheetName });
+    } catch (e) {
+      console.warn('appendToCache warning', e && e.message ? e.message : e);
+    }
+
+    // publish to MQTT (force if requested)
     const forceFlag = req.query.force === '1' || req.body && req.body.force === true;
     try { publishLocationData(loc, sheetName, rows, { force: forceFlag }); } catch (e) { console.warn('publish error', e); }
-        
-    return res.json({ ok:true, location: loc, sheetName, rows: rows.length });
+
+    return res.json({ ok:true, location: loc, sheetName, rows: Array.isArray(rows) ? rows.length : null });
   } catch (err) {
     console.error('sync-cache error', err);
     res.status(500).json({ ok:false, error: err.message || 'server_error' });
   }
 });
 
-// debug helper: read raw from sheet
+// debug helper: read raw from sheet (explicit optional)
 app.get('/debug/sensors/:locationId/raw', async (req, res) => {
   try {
     const mapping = sheetMappings.find(m => m.locationId === req.params.locationId);
     if (!mapping) return res.status(404).json({ ok:false, error:'no_mapping' });
     const explicit = req.query.sheetName || req.query.date;
-    const sheetName = getSheetName(mapping, explicit);
-    const out = await readSheet(mapping.sheetId, sheetName, 'A:Z');
-    res.json({ ok: true, sheetName, sample: (out && out[0]) || null });
+    const { sheetName, rows } = await findRecentSheetAndRows(mapping, explicit, parseInt(process.env.SHEETS_LOOKBACK_DAYS || '3', 10));
+    res.json({ ok: true, sheetName, sample: (rows && rows[0]) || null, rowCount: Array.isArray(rows) ? rows.length : 0 });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok:false, error: e.message });
@@ -255,43 +325,39 @@ app.post('/user/:uid', async (req, res) => {
   }
 });
 
-// ===== Sensor Data (HTTP) - prefer cache
+// ===== Sensor Data (HTTP) - prefer cache, fallback to sheet via findRecentSheetAndRows
 app.get('/sensors/:locationId', async (req, res) => {
   try {
     const loc = req.params.locationId;
     const mapping = sheetMappings.find(m => m.locationId === loc);
-    if (!mapping) return res.status(404).json({ error: 'no_mapping' });
+    if (!mapping) return res.status(404).json({error:'no_mapping'});
 
-    // Determine desired sheetName (supports ?sheetName=... or ?date=YYYY-MM-DD)
     const explicit = req.query.sheetName || req.query.date;
     const desiredSheet = getSheetName(mapping, explicit);
 
-    // Try read latest.json to see what cache points to (if any)
+    // Try to return cache if it already points to desired sheet
     try {
       const locDir = path.join(PUBLIC_DATA_DIR, loc);
       const latestPath = path.join(locDir, 'latest.json');
       if (fs.existsSync(latestPath)) {
         const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
-        // if latest refers to the desired sheet, return cached rows
         if (latest && latest.sheetName === desiredSheet) {
-          const cached = readCache(loc); // returns rows from the cached target file
+          const cached = readCache(loc);
           if (cached) return res.json(cached);
         }
       }
     } catch (e) {
       console.warn('warning checking latest.json for cache validation', e && e.message ? e.message : e);
-      // fallthrough -> we'll read sheet live
     }
 
-    // fallback: read sheet live (this will use desiredSheet)
-    const raw = await readSheet(mapping.sheetId, desiredSheet, 'A:Z');
-    const rows = arraysToObjects(raw || []);
+    // fallback: find recent sheet and read live
+    const { sheetName, rows } = await findRecentSheetAndRows(mapping, explicit, parseInt(process.env.SHEETS_LOOKBACK_DAYS || '3', 10));
 
-    // write cache (overwrites latest.json pointing to desiredSheet)
-    writeCache(loc, desiredSheet, rows);
+    // write cache pointing to found sheet
+    writeCache(loc, sheetName, rows);
 
-    // publish latest over MQTT if enabled
-    try { publishLocationData(loc, desiredSheet, rows); } catch (e) { console.warn('publish error', e); }
+    // publish latest
+    try { publishLocationData(loc, sheetName, rows); } catch (e) { console.warn('publish error', e); }
 
     res.json(rows);
   } catch (err) {
@@ -300,20 +366,19 @@ app.get('/sensors/:locationId', async (req, res) => {
   }
 });
 
-// ===== AUTO SYNC (optional)
+// ===== AUTO SYNC (optional) =====
 if (process.env.AUTO_SYNC === 'true') {
   const interval = parseInt(process.env.AUTO_SYNC_INTERVAL || '30000', 10);
-  console.log(`Auto-sync enabled: interval ${interval} ms`);
+  const lookback = parseInt(process.env.SHEETS_LOOKBACK_DAYS || '3', 10);
+  console.log(`Auto-sync enabled: interval ${interval} ms, lookbackDays ${lookback}`);
   async function syncAllLocationsOnce() {
     for (const mapping of sheetMappings) {
       try {
-        const sheetName = getSheetName(mapping);
-        const raw = await readSheet(mapping.sheetId, sheetName, 'A:Z');
-        const rows = arraysToObjects(raw);
+        const { sheetName, rows } = await findRecentSheetAndRows(mapping, null, lookback);
         writeCache(mapping.locationId, sheetName, rows);
         try { publishLocationData(mapping.locationId, sheetName, rows); } catch (e) { console.warn('publish error', e); }
       } catch (err) {
-        console.warn('auto-sync error for', mapping.locationId, err.message || err);
+        console.warn('auto-sync error for', mapping.locationId, err && err.message ? err.message : err);
       }
     }
   }
@@ -329,13 +394,23 @@ app.post('/ingest', async (req, res) => {
       return res.status(400).json({ error: 'missing required fields' });
     }
 
-    appendToCache({
-      timestamp: new Date().toISOString(),
-      ...payload
-    });
+    // append to ingest cache (single object payload)
+    try {
+      // Many appendToCache implementations expect a single object (payload)
+      if (appendToCache && appendToCache.length <= 1) {
+        await appendToCache({ ...payload, timestamp: new Date().toISOString() });
+      } else {
+        // else call safe wrapper with location
+        await safeAppendToCache(payload.locationId, [{ ...payload, timestamp: new Date().toISOString() }], {});
+      }
+    } catch (e) {
+      console.warn('appendToCache (ingest) failed', e && e.message ? e.message : e);
+    }
 
+    // publish ingest message (non-retain)
     try { publishIngest(payload.locationId, payload); } catch (e) { console.warn('ingest publish error', e); }
 
+    // Threshold check
     if (exceedsThreshold(payload.value, payload.threshold || 30)) {
       console.log(`ALERT: ${payload.locationId} ${payload.sensorType}=${payload.value}`);
     }
