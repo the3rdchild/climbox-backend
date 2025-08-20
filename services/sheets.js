@@ -17,7 +17,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 // Grup mapping (keep consistent with frontend)
 const SENSOR_GROUPS = {
   meteorologi: ["Wind Direction", "Wind Speed (km/h)", "Temp udara"],
-  presipitasi: ["Rainfall (mm)", "Distance (mm)"],
+  presipitasi: ["Rainfall (mm)", "Distance (mm)", "Ultrasonic Distance (cm)"],
   kualitas_fisika: ["Water Temp (C)", "EC (ms/cm)"],
   kualitas_kimia_dasar: ["TDS (ppm)", "pH"],
   kualitas_kimia_lanjut: ["DO (ug/L)"],

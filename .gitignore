@@ -13,7 +13,6 @@ firebase-debug.log
 .env
 google-service-account.json
 workspace.zip
-sheet-config.json
 data
 public
 latest.json
