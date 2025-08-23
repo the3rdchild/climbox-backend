@@ -1,0 +1,37 @@
+{
+    "timezone": "Asia/Jakarta",
+    "cache": {
+      "basePath": "../public/data",
+      "stale_minutes": 30
+    },
+    "groups": {
+      "Climbox Project": "120363419667673588@g.us",
+      "Pulau Komodo": "120363418672238609@g.us",
+      "Lokasi A": "120363421571401007@g.us"
+
+    },
+    "thresholds": {
+      "wind_kmh": { "warning": 30, "danger": 50 },
+      "rainfall_mm": { "warning": 10, "danger": 50 },
+      "water_temp": { "low_warning": 24, "low_danger": 20, "high_warning": 32, "high_danger": 34 },
+      "tss": { "warning": 100, "danger": 200 }
+    },
+    "templates": {
+      "danger": "🔴 *DANGER* - {location}\nParam: {param}\nNilai: {value}\nWaktu: {time}\n{note}",
+      "warning": "🟠 *WARNING* - {location}\nParam: {param}\nNilai: {value}\nWaktu: {time}\n{note}"
+    },
+    "send": {
+      "batch_interval_minutes": 5,
+      "random_offset_seconds_max": 10,
+      "resend_after_minutes": 30,
+      "retry_attempts": 2,
+      "retry_interval_seconds": 30
+    },
+    "behavior": {
+      "only_send_if_new_timestamp": true,
+      "notif_json": "./notif.json",
+      "health_port": 9091,
+      "health_bind": "127.0.0.1"
+    }
+  }
+  

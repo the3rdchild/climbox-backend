@@ -1,0 +1,15 @@
+[
+    {
+      "id": "pulau_komodo_water_temp_danger_2025-08-17T10:44:51.174Z",
+      "locationId": "pulau_komodo",
+      "param": "water_temp",
+      "level": "danger",
+      "value": 33.1,
+      "timestamp": "2025-08-17T10:44:51.174Z",
+      "message": "🔴 *DANGER* - Pulau Komodo\nParam: Water Temp\nNilai: 33.1°C\nWaktu: 17, 10:44\nDetail: ...",
+      "sent": false,
+      "sentAt": null,
+      "attempts": 0
+    }
+  ]
+  
