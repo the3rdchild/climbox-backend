@@ -8,7 +8,6 @@
       "Climbox Project": "120363419667673588@g.us",
       "Pulau Komodo": "120363418672238609@g.us",
       "Lokasi A": "120363421571401007@g.us"
-
     },
     "thresholds": {
       "wind_kmh": { "warning": 30, "danger": 50 },
@@ -21,9 +20,9 @@
       "warning": "🟠 *WARNING* - {location}\nParam: {param}\nNilai: {value}\nWaktu: {time}\n{note}"
     },
     "send": {
-      "batch_interval_minutes": 5,
+      "batch_interval_minutes": 1,
       "random_offset_seconds_max": 10,
-      "resend_after_minutes": 30,
+      "resend_after_minutes": 5,
       "retry_attempts": 2,
       "retry_interval_seconds": 30
     },
@@ -31,7 +30,8 @@
       "only_send_if_new_timestamp": true,
       "notif_json": "./notif.json",
       "health_port": 9091,
-      "health_bind": "127.0.0.1"
+      "health_bind": "127.0.0.1",
+      "qr_print_throttle_seconds": 60
     }
   }
   

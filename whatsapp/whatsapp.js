@@ -1,34 +1,40 @@
-// whatsapp.js
+// whatsapp.js (improved: QR handling, reconnect/backoff, group mapping)
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const { makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
 const http = require('http');
-const { evaluateLatest } = require('./threshold');
-const { DateTime } = require('luxon'); // optional, good for timezone formatting
+const qrcode = require('qrcode-terminal');
+const { DateTime } = require('luxon');
 
-// Load config
+const {
+  makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
+
+const { evaluateLatest } = require('./threshold');
+
+// --- load config ---
 const confPath = path.join(__dirname, 'config.json');
 if (!fs.existsSync(confPath)) {
   console.error('config.json not found in whatsapp/ - please create from template.');
   process.exit(1);
 }
-const cfg = JSON.parse(fs.readFileSync(confPath,'utf8'));
+const cfg = JSON.parse(fs.readFileSync(confPath, 'utf8'));
 
 // resolve paths
 const backendRoot = path.resolve(__dirname, '..');
 const cacheBase = path.resolve(backendRoot, cfg.cache.basePath || '../public/data');
 const notifPath = path.resolve(__dirname, cfg.behavior.notif_json || './notif.json');
+const groupsJsonPath = path.resolve(__dirname, 'groups.json'); // file produced by get-jids-safe.js
 
-// helper: atomic write
+// --- helpers ---
 async function atomicWriteJson(filePath, obj) {
   const tmp = filePath + '.tmp.' + Date.now();
   await fsp.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
   await fsp.rename(tmp, filePath);
 }
 
-// load notif.json (safe)
 async function loadNotif() {
   try {
     if (!fs.existsSync(notifPath)) return [];
@@ -41,7 +47,6 @@ async function loadNotif() {
   }
 }
 
-// write notif
 async function saveNotif(arr) {
   try {
     await atomicWriteJson(notifPath, arr);
@@ -50,21 +55,18 @@ async function saveNotif(arr) {
   }
 }
 
-// format time
 function fmtTime(ts) {
   try {
     if (!ts) return '';
     const d = new Date(ts);
     if (isNaN(d.getTime())) return String(ts);
-    // use Asia/Jakarta
     const dt = DateTime.fromJSDate(d).setZone(cfg.timezone || 'Asia/Jakarta');
     return dt.toFormat('dd, HH:mm');
   } catch (e) { return String(ts); }
 }
 
-// build message from template
 function buildMessage(template, data) {
-  return template
+  return (template || '')
     .replace('{location}', data.location || '')
     .replace('{param}', data.param || '')
     .replace('{value}', data.value === undefined ? '' : String(data.value))
@@ -72,10 +74,8 @@ function buildMessage(template, data) {
     .replace('{note}', data.note || '');
 }
 
-// find latest cache file for location
 async function findLatestCacheFile(locationId) {
-  // check today then yesterday
-  const tryDays = [0,1,2]; // today, yesterday, day before
+  const tryDays = [0,1,2];
   for (const d of tryDays) {
     const dt = DateTime.local().setZone(cfg.timezone || 'Asia/Jakarta').minus({ days: d });
     const fname = `data_${dt.toISODate()}.json`;
@@ -98,18 +98,16 @@ async function loadRowsFromCache(locationId) {
   }
 }
 
-// scan locations from config.groups keys
 function getAllLocations() {
+  // prefer explicit list in cfg.groups; fallback to reading groups.json keys
   return Object.keys(cfg.groups || {});
 }
 
-// determine if event is already recorded in notif.json (by id)
 function makeId(locationId, param, level, timestamp) {
   const t = timestamp || '';
   return `${locationId}_${param}_${level}_${t}`;
 }
 
-// check resend eligibility
 function shouldResend(existingEntry, nowTs) {
   if (!existingEntry) return true;
   const resendMin = (cfg.send && cfg.send.resend_after_minutes) || 30;
@@ -120,76 +118,258 @@ function shouldResend(existingEntry, nowTs) {
   return (now - sentAt) >= (resendMin * 60 * 1000);
 }
 
-// create event entries from evaluateLatest results
 async function produceEventsForLocation(locationId) {
   const rows = await loadRowsFromCache(locationId);
   if (!rows) return [];
   const events = evaluateLatest(rows, cfg.thresholds || {});
-  // attach location/time
   return events.map(ev => Object.assign({}, ev, {
     locationId,
     timeFormatted: fmtTime(ev.timestamp),
   }));
 }
 
-// --- Baileys send helper ---
-async function sendTextToJid(sock, jid, text) {
+// --- group mapping loader: combine config.groups + groups.json (if available) ---
+function loadGroupsJson() {
   try {
-    const res = await sock.sendMessage(jid, { text });
-    return { ok: true, res };
+    if (!fs.existsSync(groupsJsonPath)) return {};
+    const raw = fs.readFileSync(groupsJsonPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed || {};
   } catch (e) {
-    return { ok: false, error: e.message || String(e) };
+    console.warn('Failed to read groups.json', e.message);
+    return {};
   }
 }
 
-// --- Scheduler & main loop ---
-let sock = null;
-let authStateSaver = null;
-async function startWhatsAppWorker() {
-  // create auth and socket
-  const { state, saveCreds } = await useMultiFileAuthState(path.join(__dirname,'session'));
-  authStateSaver = saveCreds;
-  sock = makeWASocket({ auth: state, printQRInTerminal: true });
-
-  sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', (update) => {
-    if (update.qr) qrcode.generate(update.qr, { small: true });
-    if (update.connection === 'open') console.log('WhatsApp: connected');
-    if (update.connection === 'close') console.warn('WhatsApp: disconnected', update.lastDisconnect);
-  });
-
-  // main periodic loop
-  const intervalMs = (cfg.send && cfg.send.batch_interval_minutes ? cfg.send.batch_interval_minutes : 5) * 60 * 1000;
-  // run immediately then schedule
-  await runScanAndSchedule(sock);
-  setInterval(() => { runScanAndSchedule(sock).catch(e => console.error('runScan err', e)); }, intervalMs);
+function resolveGroupJidForLocation(locationId, groupsJson) {
+  // 1) direct mapping in config.json
+  if (cfg.groups && cfg.groups[locationId]) return cfg.groups[locationId];
+  // 2) try groups.json: either a key matching locationId or a subject equal to locationId
+  // groups.json typically maps { "Group Name": "jid@g.us" }
+  if (groupsJson && typeof groupsJson === 'object') {
+    if (groupsJson[locationId]) return groupsJson[locationId];
+    // try case-insensitive key match
+    const low = locationId.toLowerCase();
+    for (const [k,v] of Object.entries(groupsJson)) {
+      if (String(k).toLowerCase().includes(low) || low.includes(String(k).toLowerCase())) return v;
+    }
+  }
+  return null;
 }
 
-// scan, build notif.json changes, schedule sends
-async function runScanAndSchedule(sockInstance) {
-  const locations = getAllLocations();
-  if (!locations || locations.length === 0) return;
-  let notif = await loadNotif();
+// --- Baileys helpers & robust connect/reconnect ---
+let sock = null;
+let authStateSave = null;
+let connected = false;
+const qrFlagPath = path.join(__dirname, 'session', 'qr_printed');
+let _qrPrintedOnce = false;
+try { _qrPrintedOnce = fs.existsSync(qrFlagPath); } catch (e) { _qrPrintedOnce = false; }
+let _authenticated = false;
+const QR_PRINT_THROTTLE_SECONDS = (cfg.behavior && cfg.behavior.qr_print_throttle_seconds) || 60;
+let _lastQr = null;
+let _lastQrPrintedAt = 0;
 
+async function createSocketAndStart() {
+  // fetch latest baileys version
+  let versionInfo = {};
+  try {
+    versionInfo = await fetchLatestBaileysVersion();
+    console.log('Baileys web version:', versionInfo.version, 'isLatest?', versionInfo.isLatest);
+  } catch (e) {
+    console.warn('fetchLatestBaileysVersion failed, using defaults', e?.message || e);
+  }
+
+  // use multi-file auth state
+  const sessionDir = path.join(__dirname, 'session');
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  authStateSave = saveCreds;
+
+  // create socket
+  sock = makeWASocket({
+    auth: state,
+    version: versionInfo.version,
+    printQRInTerminal: false, // we handle QR event ourselves
+    browser: ['climbox-whatsapp-worker','Chrome','1.0.0'],
+    // defaultQueryTimeoutMs: undefined
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+// inside createSocketAndStart() after sock.ev.on('creds.update', saveCreds);
+sock.ev.on('connection.update', async (update) => {
+  try {
+    // QR handling (throttle + persist-once)
+    if (update.qr) {
+      const now = Date.now();
+      const sameQr = (_lastQr && update.qr === _lastQr);
+      const elapsed = now - (_lastQrPrintedAt || 0);
+
+      if (!_authenticated && !_qrPrintedOnce && (!sameQr || elapsed >= QR_PRINT_THROTTLE_SECONDS * 1000)) {
+        console.log('=== QR CODE (scan with sender account) ===');
+        qrcode.generate(update.qr, { small: true });
+
+        // persist marker (so we never spam again)
+        try {
+          const sessDir = path.dirname(qrFlagPath);
+          if (!fs.existsSync(sessDir)) fs.mkdirSync(sessDir, { recursive: true });
+          fs.writeFileSync(qrFlagPath, new Date().toISOString(), 'utf8');
+          _qrPrintedOnce = true;
+        } catch (e) {
+          console.warn('Could not write qr flag file:', e.message || e);
+          _qrPrintedOnce = true;
+        }
+
+        _lastQr = update.qr;
+        _lastQrPrintedAt = now;
+      } else {
+        if (_qrPrintedOnce) console.log('QR suppressed: previously printed for this installation.');
+        else console.log('QR suppressed (throttled).');
+      }
+    }
+
+    // connection opened -> mark authenticated + connected
+    if (update.connection === 'open') {
+      _authenticated = true;
+      connected = true;            // <-- IMPORTANT: set connected here
+      _lastQr = null;
+      _lastQrPrintedAt = 0;
+      console.log('WhatsApp: connected (open)');
+
+      // fetch groups and save
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        const byName = {};
+        for (const [jid, meta] of Object.entries(groups || {})) {
+          const name = meta?.subject || jid;
+          byName[name] = jid;
+        }
+        await atomicWriteJson(groupsJsonPath, byName);
+        console.log('Saved groups.json with', Object.keys(byName).length, 'groups');
+      } catch (e) {
+        console.warn('groupFetchAllParticipating failed (ok to ignore if private account):', e?.message || e);
+      }
+    }
+
+    // connection closed -> mark unauthenticated + not connected
+    if (update.connection === 'close') {
+      _authenticated = false;
+      connected = false;           // <-- IMPORTANT: clear connected here
+      console.warn('WhatsApp: disconnected', update.lastDisconnect || update);
+      // keep qr_printed marker — do not clear, to avoid QR spam
+    }
+  } catch (e) {
+    console.error('connection.update handler error', e);
+  }
+});
+
+  sock.ev.on('connection.error', (err) => {
+    console.error('connection.error event', err);
+  });
+
+  // optional: log messages that arrive (you can disable in prod)
+  sock.ev.on('messages.upsert', async (m) => {
+    // keep small: only print if group message arrives
+    try {
+      const messages = m.messages || (m && m.messages ? m.messages : []);
+      for (const msg of messages) {
+        const from = msg.key?.remoteJid;
+        if (!from) continue;
+        if (from.endsWith && from.endsWith('@g.us')) {
+          console.log('Group message from', from, '=>', (msg.message && msg.message.conversation) || msg.pushName || '(no text)');
+        }
+      }
+    } catch (e) { /* ignore */ }
+  });
+
+  return sock;
+}
+
+let creatingSocket = false;
+
+async function ensureConnectedSocket() {
+  let tries = 0;
+  const maxTries = 30;
+  while (true) {
+    try {
+      // if socket exists and is connected (flag), return it
+      if (sock && connected) return sock;
+
+      // if a create is already in-flight, wait and loop
+      if (creatingSocket) {
+        await new Promise(r => setTimeout(r, 1000));
+        tries++;
+        if (tries >= maxTries) throw new Error('Timeout waiting for socket creation');
+        continue;
+      }
+
+      creatingSocket = true;
+      console.log('Creating WA socket (attempt', tries+1, ')');
+      try {
+        sock = await createSocketAndStart();
+      } finally {
+        creatingSocket = false;
+      }
+
+      // wait a little for connection.update to set `connected`
+      let waitMs = 0;
+      while (waitMs < 5000) { // wait up to ~5s for open
+        if (connected && sock) return sock;
+        await new Promise(r => setTimeout(r, 500));
+        waitMs += 500;
+      }
+
+      // if not connected after wait, continue loop (backoff)
+    } catch (e) {
+      console.warn('createSocketAndStart error', e?.message || e);
+    }
+
+    tries++;
+    const wait = Math.min(30000, 1000 * Math.pow(2, Math.min(10, tries))); // progressive backoff to max 30s
+    console.log(`Will retry create socket in ${Math.round(wait/1000)}s`);
+    await new Promise(r => setTimeout(r, wait));
+    if (tries >= maxTries) {
+      console.error('Max socket creation attempts reached');
+      throw new Error('Max socket creation attempts reached');
+    }
+  }
+}
+
+
+// send text to jid helper
+async function sendTextToJid(currSock, jid, text) {
+  try {
+    const res = await currSock.sendMessage(jid, { text });
+    return { ok: true, res };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+// --- main logic: scanning and scheduling (unchanged core) ---
+async function runScanAndSchedule(currSock) {
+  const allLocations = getAllLocations();
+  if (!allLocations || allLocations.length === 0) return;
+  let notif = await loadNotif();
   const newEntries = [];
 
-  for (const loc of locations) {
+  // load fallback groups.json
+  const groupsFromJson = loadGroupsJson();
+
+  for (const loc of allLocations) {
     try {
       const evs = await produceEventsForLocation(loc);
       for (const e of evs) {
         const id = makeId(e.locationId, e.param, e.level, e.timestamp);
         const existing = notif.find(x => x.id === id);
         if (existing) {
-          // already exists; skip unless resend allowed by schedule
           if (shouldResend(existing)) {
-            // mark for resend by setting sent=false and attempts reset if needed
             existing.sent = false;
-            existing.attempts = existing.attempts ? existing.attempts : 0;
+            existing.attempts = existing.attempts || 0;
             newEntries.push(existing);
           }
           continue;
         }
-        // create new entry
+        const template = cfg.templates && cfg.templates[e.level] ? cfg.templates[e.level] : (cfg.templates && cfg.templates.danger) || '{location} {param} {value}';
         const entry = {
           id,
           locationId: e.locationId,
@@ -197,7 +377,7 @@ async function runScanAndSchedule(sockInstance) {
           level: e.level,
           value: e.value,
           timestamp: e.timestamp,
-          message: buildMessage(cfg.templates[e.level] || cfg.templates.danger || '{location} {param} {value}', {
+          message: buildMessage(template, {
             location: e.locationId,
             param: e.param,
             value: e.value,
@@ -213,7 +393,7 @@ async function runScanAndSchedule(sockInstance) {
         newEntries.push(entry);
       }
     } catch (e) {
-      console.warn('produceEventsForLocation error', loc, e.message);
+      console.warn('produceEventsForLocation error', loc, e?.message || e);
     }
   }
 
@@ -221,13 +401,10 @@ async function runScanAndSchedule(sockInstance) {
     await saveNotif(notif);
   }
 
-  // schedule sends per location with random offset
-  scheduleSends(sockInstance, notif);
+  scheduleSends(currSock, notif, groupsFromJson);
 }
 
-// schedule sends: group by location, add random offsets between locations
-function scheduleSends(sockInstance, notifArray) {
-  // group unsent entries by location
+function scheduleSends(sockInstance, notifArray, groupsFromJson) {
   const unsent = notifArray.filter(n => !n.sent);
   const byLoc = {};
   for (const u of unsent) {
@@ -238,28 +415,26 @@ function scheduleSends(sockInstance, notifArray) {
   let offsetAcc = 0;
   for (const loc of locs) {
     const locEntries = byLoc[loc];
-    // compute random offset for this location
-    const maxRand = cfg.send && cfg.send.random_offset_seconds_max ? cfg.send.random_offset_seconds_max : 10;
+    const maxRand = (cfg.send && cfg.send.random_offset_seconds_max) || 10;
     const rand = Math.floor(Math.random() * (maxRand + 1));
     offsetAcc += rand;
-    // schedule send after offsetAcc seconds
     setTimeout(() => {
-      sendBatchForLocation(sockInstance, loc, locEntries).catch(e => console.error('sendBatchForLocation err', e));
+      sendBatchForLocation(sockInstance, loc, locEntries, groupsFromJson).catch(e => console.error('sendBatchForLocation err', e));
     }, offsetAcc * 1000);
   }
 }
 
-// send batch for single location
-async function sendBatchForLocation(sockInstance, locationId, entries) {
-  const groupJid = cfg.groups && cfg.groups[locationId];
+async function sendBatchForLocation(sockInstance, locationId, entries, groupsFromJson) {
+  // resolve groupJid from config or groups.json
+  const groupJid = resolveGroupJidForLocation(locationId, groupsFromJson);
   if (!groupJid) {
     console.warn('No groupJid mapping for', locationId);
     return;
   }
+
   for (const ent of entries) {
-    // attempt send with retries
     let attempt = 0;
-    const maxAttempts = cfg.send && cfg.send.retry_attempts !== undefined ? cfg.send.retry_attempts : 2;
+    const maxAttempts = (cfg.send && cfg.send.retry_attempts !== undefined) ? cfg.send.retry_attempts : 2;
     let sentOk = false;
     while (attempt <= maxAttempts && !sentOk) {
       attempt++;
@@ -271,14 +446,12 @@ async function sendBatchForLocation(sockInstance, locationId, entries) {
         sentOk = true;
       } else {
         console.warn('Send failed attempt', attempt, 'for', ent.id, res && res.error);
-        // wait retry_interval_seconds before next attempt if not last
         if (attempt <= maxAttempts) {
           const wait = (cfg.send && cfg.send.retry_interval_seconds) || 30;
           await new Promise(r => setTimeout(r, wait * 1000));
         }
       }
     }
-    // update notif.json after each entry to record status
     const notifArr = await loadNotif();
     const idx = notifArr.findIndex(x => x.id === ent.id);
     if (idx >= 0) {
@@ -288,7 +461,7 @@ async function sendBatchForLocation(sockInstance, locationId, entries) {
   }
 }
 
-// --- Health HTTP server on localhost only ---
+// --- health server (localhost only) ---
 function startHealthServer() {
   const port = cfg.behavior && cfg.behavior.health_port ? cfg.behavior.health_port : 9091;
   const bind = cfg.behavior && cfg.behavior.health_bind ? cfg.behavior.health_bind : '127.0.0.1';
@@ -307,13 +480,28 @@ function startHealthServer() {
   });
 }
 
-// --- bootstrap ---
+// --- bootstrap: ensure socket + periodic scan loop ---
 (async () => {
   try {
     startHealthServer();
-    await startWhatsAppWorker();
+    // ensure connection available
+    const sockInstance = await ensureConnectedSocket();
+
+    // run initial scan immediately
+    await runScanAndSchedule(sockInstance);
+
+    // schedule periodic scanning using config interval
+    const intervalMs = (cfg.send && cfg.send.batch_interval_minutes ? cfg.send.batch_interval_minutes : 5) * 60 * 1000;
+    setInterval(async () => {
+      try {
+        const s = await ensureConnectedSocket();
+        await runScanAndSchedule(s);
+      } catch (e) {
+        console.error('Periodic runScan error', e?.message || e);
+      }
+    }, intervalMs);
   } catch (e) {
-    console.error('Worker failed', e);
+    console.error('Worker bootstrap failed', e);
     process.exit(1);
   }
 })();

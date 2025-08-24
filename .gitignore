@@ -16,5 +16,6 @@ workspace.zip
 data
 public
 latest.json
-seasion
+whatsapp/session/
 creds.json
+whatsapp/groups.json
