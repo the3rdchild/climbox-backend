@@ -192,5 +192,18 @@
     "sentAt": "2025-08-24T07:48:02.873Z",
     "attempts": 1,
     "createdAt": "2025-08-24T07:47:23.794Z"
+  },
+  {
+    "id": "Pulau_Komodo_water_temp_35_2025-08-24T07:57:13.809Z",
+    "locationId": "Pulau Komodo",
+    "param": "water_temp",
+    "level": "danger",
+    "value": 35,
+    "timestamp": "2025-08-24T07:57:13.809Z",
+    "message": "🔴 *DANGER* - Pulau Komodo\nParam: water_temp\nNilai: 35\nWaktu: 24, 14:57\n",
+    "sent": true,
+    "sentAt": "2025-08-24T07:57:57.677Z",
+    "attempts": 1,
+    "createdAt": "2025-08-24T07:57:13.809Z"
   }
 ]
