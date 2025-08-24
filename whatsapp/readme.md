@@ -1,3 +1,5 @@
+npm install @whiskeysockets/baileys qrcode-terminal luxon
+
 npm i @whiskeysockets/baileys qrcode-terminal pino
 
 npm i @whiskeysockets/baileys qrcode-terminal
