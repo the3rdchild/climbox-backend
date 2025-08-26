@@ -17,6 +17,7 @@ const { evaluateLatest } = require('./threshold');
 // --- load config ---
 const confPath = path.join(__dirname, 'config.json');
 if (!fs.existsSync(confPath)) {
+  console.log('Exists?', fs.existsSync(cacheBase));
   console.error('config.json not found in whatsapp/ - please create from template.');
   process.exit(1);
 }
@@ -24,10 +25,33 @@ const cfg = JSON.parse(fs.readFileSync(confPath, 'utf8'));
 
 // resolve paths
 const backendRoot = path.resolve(__dirname, '..');
-const cacheBase = path.resolve(backendRoot, cfg.cache.basePath || '../public/data');
-const notifPath = path.resolve(__dirname, cfg.behavior.notif_json || './notif.json');
+// resolve cache base relative to backend root; default 'public/data'
+const rawCacheSetting = (cfg.cache && cfg.cache.basePath) ? cfg.cache.basePath : 'public/data';
+let cacheBase;
+if (path.isAbsolute(rawCacheSetting)) {
+  cacheBase = rawCacheSetting;
+} else {
+  // strip any leading ../ segments (so ../public/data -> public/data relative to backendRoot)
+  const stripped = rawCacheSetting.replace(/^(\.\.\/)+/, '');
+  cacheBase = path.join(backendRoot, stripped);
+}
+console.log('cacheBase resolved to', cacheBase);
+
+const notifPath = path.resolve(__dirname, cfg.behavior.notif_json || path.join(__dirname, 'notif.json'));
 const groupsJsonPath = path.resolve(__dirname, 'groups.json'); // file produced by get-jids-safe.js
 
+async function ensureNotifFile() {
+  try {
+    const dir = path.dirname(notifPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(notifPath)) {
+      await atomicWriteJson(notifPath, []); // uses your atomicWriteJson helper
+      console.log('Created empty notif.json at', notifPath);
+    }
+  } catch (e) {
+    console.error('Could not ensure notif.json exists:', e.message || e);
+  }
+}
 // --- helpers ---
 async function atomicWriteJson(filePath, obj) {
   const tmp = filePath + '.tmp.' + Date.now();
@@ -75,15 +99,70 @@ function buildMessage(template, data) {
 }
 
 async function findLatestCacheFile(locationId) {
-  const tryDays = [0,1,2];
-  for (const d of tryDays) {
-    const dt = DateTime.local().setZone(cfg.timezone || 'Asia/Jakarta').minus({ days: d });
-    const fname = `data_${dt.toISODate()}.json`;
-    const candidate = path.join(cacheBase, locationId, fname);
-    if (fs.existsSync(candidate)) return candidate;
+  // candidate folders to try, order matters
+  const candidates = [];
+
+  // 1) original as-is
+  candidates.push(locationId);
+
+  // 2) normalized: lowercase, spaces->underscore
+  candidates.push(String(locationId).toLowerCase().replace(/\s+/g, '_'));
+
+  // 3) normalized: lowercase, remove non-alnum (used earlier)
+  const normalize = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  candidates.push(normalize(locationId));
+
+  // 4) try folderName from sheets-credentials.json if present
+  try {
+    const sheets = require('../sheets-credentials.json');
+    const entry = (sheets || []).find(x => x.locationId === locationId);
+    if (entry && entry.folderName) {
+      candidates.push(entry.folderName);
+      candidates.push(String(entry.folderName).toLowerCase().replace(/\s+/g, '_'));
+      candidates.push(normalize(entry.folderName));
+    }
+  } catch (e) {
+    // ignore sheets read error
   }
+
+  // unique
+  const seen = new Set();
+  const finalCandidates = candidates.filter(c => {
+    if (!c) return false;
+    if (seen.has(c)) return false;
+    seen.add(c);
+    return true;
+  });
+
+  // debug: log attempted folders for visibility
+  console.log('findLatestCacheFile candidates for', locationId, finalCandidates);
+
+  // try each candidate folder for the latest data file
+  const tryDays = [0,1,2];
+  for (const folder of finalCandidates) {
+    for (const d of tryDays) {
+      const dt = DateTime.local().setZone(cfg.timezone || 'Asia/Jakarta').minus({ days: d });
+      const fname = `data_${dt.toISODate()}.json`;
+      const candidate = path.join(cacheBase, folder, fname);
+      if (fs.existsSync(candidate)) {
+        console.log('Found cache file for', locationId, '->', candidate);
+        return candidate;
+      }
+    }
+    // also try latest.json in that folder
+    const latestJson = path.join(cacheBase, folder, 'latest.json');
+    if (fs.existsSync(latestJson)) {
+      console.log('Found latest.json for', locationId, '->', latestJson);
+      return latestJson;
+    }
+  }
+
+  // debug: log attempted folders for visibility
+  console.log('No cache file found for', locationId, 'tried folders:', finalCandidates);
   return null;
 }
+
+
 
 async function loadRowsFromCache(locationId) {
   const file = await findLatestCacheFile(locationId);
@@ -99,9 +178,16 @@ async function loadRowsFromCache(locationId) {
 }
 
 function getAllLocations() {
-  // prefer explicit list in cfg.groups; fallback to reading groups.json keys
-  return Object.keys(cfg.groups || {});
+  // Use sheets-credentials.json as the canonical list of locations (safer)
+  try {
+    const sheetsMap = require('../sheets-credentials.json'); // array
+    return sheetsMap.map(m => m.locationId);
+  } catch (e) {
+    // fallback to cfg.groups keys if sheets not available
+    return Object.keys(cfg.groups || {});
+  }
 }
+
 
 function makeId(locationId, param, level, timestamp) {
   const t = timestamp || '';
@@ -141,21 +227,64 @@ function loadGroupsJson() {
   }
 }
 
-function resolveGroupJidForLocation(locationId, groupsJson) {
-  // 1) direct mapping in config.json
+function getGroupJid(locationId, groupsJson) {
+  // helper normalizer
+  const normalize = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+  // 1) exact config match
   if (cfg.groups && cfg.groups[locationId]) return cfg.groups[locationId];
-  // 2) try groups.json: either a key matching locationId or a subject equal to locationId
-  // groups.json typically maps { "Group Name": "jid@g.us" }
-  if (groupsJson && typeof groupsJson === 'object') {
-    if (groupsJson[locationId]) return groupsJson[locationId];
-    // try case-insensitive key match
-    const low = locationId.toLowerCase();
-    for (const [k,v] of Object.entries(groupsJson)) {
-      if (String(k).toLowerCase().includes(low) || low.includes(String(k).toLowerCase())) return v;
+
+  // 2) normalized config match
+  if (cfg.groups) {
+    for (const [k, v] of Object.entries(cfg.groups)) {
+      if (normalize(k) === normalize(locationId)) return v;
     }
   }
+
+  // 3) try groups.json direct key or normalized
+  if (groupsJson && typeof groupsJson === 'object') {
+    // direct key
+    if (groupsJson[locationId]) return groupsJson[locationId];
+
+    // normalized subject match (key might be subject name)
+    for (const [k, v] of Object.entries(groupsJson)) {
+      if (normalize(k) === normalize(locationId)) return v;
+      if (normalize(k).includes(normalize(locationId)) || normalize(locationId).includes(normalize(k))) return v;
+    }
+  }
+
+  // 4) try matching by folder name variants (same normalization used for cache)
+  const possibleFolderNames = [
+    locationId,
+    String(locationId).toLowerCase().replace(/\s+/g, '_'),
+    String(locationId).toLowerCase().replace(/[^a-z0-9]+/g, '')
+  ];
+  // if sheets has folderName property, try it
+  try {
+    const sheets = require('../sheets-credentials.json');
+    const entry = (sheets || []).find(x => x.locationId === locationId);
+    if (entry && entry.folderName) {
+      possibleFolderNames.push(entry.folderName);
+      possibleFolderNames.push(String(entry.folderName).toLowerCase().replace(/\s+/g, '_'));
+      possibleFolderNames.push(String(entry.folderName).toLowerCase().replace(/[^a-z0-9]+/g, ''));
+    }
+  } catch (e) {}
+
+  for (const cand of possibleFolderNames) {
+    // check if config has key equal to cand
+    if (cfg.groups && cfg.groups[cand]) return cfg.groups[cand];
+    // check normalized config keys again
+    if (cfg.groups) {
+      for (const [k, v] of Object.entries(cfg.groups)) {
+        if (normalize(k) === normalize(cand)) return v;
+      }
+    }
+  }
+
+  // not found
   return null;
 }
+
 
 // --- Baileys helpers & robust connect/reconnect ---
 let sock = null;
@@ -357,6 +486,7 @@ async function runScanAndSchedule(currSock) {
 
   for (const loc of allLocations) {
     try {
+      console.log('Checking location:', loc);
       const evs = await produceEventsForLocation(loc);
       for (const e of evs) {
         const id = makeId(e.locationId, e.param, e.level, e.timestamp);
@@ -426,9 +556,13 @@ function scheduleSends(sockInstance, notifArray, groupsFromJson) {
 
 async function sendBatchForLocation(sockInstance, locationId, entries, groupsFromJson) {
   // resolve groupJid from config or groups.json
-  const groupJid = resolveGroupJidForLocation(locationId, groupsFromJson);
+  const groupJid = getGroupJid(locationId, groupsFromJson);
   if (!groupJid) {
     console.warn('No groupJid mapping for', locationId);
+    console.log('Resolving group jid for', locationId);
+console.log('cfg.groups keys:', Object.keys(cfg.groups || {}));
+console.log('groupsFromJson keys:', Object.keys(groupsFromJson || {}));
+
     return;
   }
 
@@ -480,11 +614,64 @@ function startHealthServer() {
   });
 }
 
+// helper normalize string for fuzzy compare
+function normalizeName(s) {
+  if (!s) return '';
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+}
+
+async function produceGroupCandidates() {
+  try {
+    // load groups.json (jid -> meta subject keys handled earlier as byName{name: jid})
+    const groups = loadGroupsJson(); // returns object { 'Group Subject': 'jid@g.us', ... }
+    const byName = {};
+    for (const [name, jid] of Object.entries(groups || {})) {
+      byName[normalizeName(name)] = { name, jid };
+    }
+
+    // load locations from sheets-credentials.json
+    const sheetsMap = require('../sheets-credentials.json'); // array
+    const candidates = {};
+    for (const map of sheetsMap) {
+      const loc = map.locationId;
+      const normLoc = normalizeName(loc);
+      candidates[loc] = { found: false, matches: [] };
+
+      // exact normalized match
+      if (byName[normLoc]) {
+        candidates[loc].found = true;
+        candidates[loc].matches.push(byName[normLoc]);
+        // (optional) auto assign into cfg.groups in-memory
+        // cfg.groups = cfg.groups || {};
+        // cfg.groups[loc] = byName[normLoc].jid;
+      } else {
+        // try includes / partial match
+        for (const [k, v] of Object.entries(byName)) {
+          if (k.includes(normLoc) || normLoc.includes(k)) {
+            candidates[loc].matches.push(v);
+          }
+        }
+      }
+    }
+
+    // write candidates to file for manual review
+    const candPath = path.resolve(__dirname, 'groups-candidates.json');
+    await atomicWriteJson(candPath, candidates);
+    console.log('Wrote group candidates to', candPath);
+    return candidates;
+  } catch (e) {
+    console.warn('produceGroupCandidates failed', e?.message || e);
+    return {};
+  }
+}
+
+
 // --- bootstrap: ensure socket + periodic scan loop ---
 (async () => {
   try {
     startHealthServer();
     // ensure connection available
+    await ensureNotifFile();
     const sockInstance = await ensureConnectedSocket();
 
     // run initial scan immediately

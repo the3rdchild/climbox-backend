@@ -5,14 +5,13 @@
       "stale_minutes": 30
     },
     "groups": {
-      "Climbox Project": "120363419667673588@g.us",
-      "Pulau Komodo": "120363418672238609@g.us",
-      "Lokasi A": "120363421571401007@g.us"
+      "Climbox": "120363422885107873@g.us",
+      "Noabox": "120363419457999751@g.us"
     },
     "thresholds": {
       "wind_kmh": { "warning": 30, "danger": 50 },
       "rainfall_mm": { "warning": 10, "danger": 50 },
-      "water_temp": { "low_warning": 24, "low_danger": 20, "high_warning": 32, "high_danger": 34 },
+      "water_temp": { "low_warning": 30, "low_danger": 27, "high_warning": 32, "high_danger": 34 },
       "tss": { "warning": 100, "danger": 200 }
     },
     "templates": {

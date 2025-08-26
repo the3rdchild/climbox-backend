@@ -5,7 +5,7 @@ const { DateTime } = require('luxon');
 
 const cfgPath = path.join(__dirname, 'config.json');
 const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-const notifPath = path.resolve(__dirname, cfg.behavior.notif_json || './notif.json');
+const notifPath = path.resolve(__dirname, cfg.behavior.notif_json || path.join(__dirname, 'notif.json'));
 
 function nowISO() { return new Date().toISOString(); }
 function sanitizeIdPart(s) { return String(s || '').trim().replace(/\s+/g, '_'); }
