@@ -10,8 +10,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.18",
-    "luxon": "^3.7.1",
+    "@whiskeysockets/baileys": "^6.7.20",
+    "luxon": "^3.7.2",
+    "pino": "^10.0.0",
     "qrcode-terminal": "^0.12.0"
   }
 }
